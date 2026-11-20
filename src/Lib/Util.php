@@ -198,8 +198,11 @@ class Util
         $command = $header['command'];
 
         if ($command == self::CMD_PREPARE_DATA) {
-            if (strlen($self->_data_recv) !== 12) {
+            if (! in_array(strlen($self->_data_recv), [12, 16], true)) {
                 throw new RuntimeException('Invalid terminal transfer size response.', LaravelZkteco::ERROR_PROTOCOL);
+            }
+            if (strlen($self->_data_recv) === 16 && unpack('V', substr($self->_data_recv, 12, 4))[1] !== 1024) {
+                throw new RuntimeException('Unsupported terminal transfer packet size.', LaravelZkteco::ERROR_PROTOCOL);
             }
 
             return unpack('V', substr($self->_data_recv, 8, 4))[1];
@@ -377,6 +380,8 @@ class Util
     {
         $self->assertOperationActive();
         $bytes = self::getSize($self);
+        $legacy = strlen($self->_data_recv) === 16;
+        $reply = unpack('v', substr($self->_data_recv, 6, 2))[1];
         if ($bytes === false) {
             if (strlen($self->_data_recv) !== 8 || ! self::checkValid($self->_data_recv)) {
                 throw new RuntimeException('Invalid empty terminal transfer response.', LaravelZkteco::ERROR_PROTOCOL);
@@ -392,6 +397,7 @@ class Util
         }
         $data = '';
         $received = 0;
+        $sequence = 0;
         $deadline = $self->transferDeadline();
         $receive = static function () use ($self, $deadline): string {
             try {
@@ -406,7 +412,8 @@ class Util
         };
         while ($received < $bytes) {
             $packet = $receive();
-            $header = $self->validatePacket($packet, $self->_session_id);
+            // Legacy bulk headers carry a packet counter, not the connected session.
+            $header = $self->validatePacket($packet, $legacy ? null : $self->_session_id);
             if ($header['command'] === self::CMD_ACK_UNAUTH) {
                 throw new RuntimeException('Terminal access is unauthorized.', LaravelZkteco::ERROR_UNAUTHORIZED);
             }
@@ -417,8 +424,13 @@ class Util
                 throw new RuntimeException('Invalid terminal transfer packet.', LaravelZkteco::ERROR_PROTOCOL);
             }
             $payload = substr($packet, 8);
+            if ($legacy && ($header['session'] !== $sequence % 65536 || $header['reply'] !== $reply
+                || strlen($payload) !== min(1024, $bytes - $received))) {
+                throw new RuntimeException('Invalid terminal transfer packet sequence or size.', LaravelZkteco::ERROR_PROTOCOL);
+            }
             $data .= $first ? $packet : $payload;
             $received += strlen($payload);
+            $sequence++;
             $first = false;
             if ($received > $bytes) {
                 throw new RuntimeException('Terminal transfer exceeds its declared size.', LaravelZkteco::ERROR_PROTOCOL);
@@ -426,18 +438,21 @@ class Util
         }
 
         $packet = $receive();
-        $header = $self->validatePacket($packet, $self->_session_id);
+        $header = $self->validatePacket($packet, $legacy ? null : $self->_session_id);
         if ($header['command'] === self::CMD_ACK_UNAUTH) {
             throw new RuntimeException('Terminal access is unauthorized.', LaravelZkteco::ERROR_UNAUTHORIZED);
         }
         if ($header['command'] === self::CMD_ACK_ERROR) {
             throw new RuntimeException('Terminal rejected the transfer.', LaravelZkteco::ERROR_REJECTED);
         }
-        if ($header['command'] !== self::CMD_ACK_OK || strlen($packet) !== 8) {
+        if ($header['command'] !== self::CMD_ACK_OK || strlen($packet) !== 8
+            || ($legacy && ($header['session'] !== $bytes % 65536 || $header['reply'] !== $reply))) {
             throw new RuntimeException('Invalid terminal transfer completion acknowledgement.', LaravelZkteco::ERROR_PROTOCOL);
         }
         $self->_data_recv = $packet;
-        $self->rememberReply($header['reply']);
+        if (! $legacy) {
+            $self->rememberReply($header['reply']);
+        }
 
         return $data;
     }

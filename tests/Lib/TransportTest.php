@@ -216,6 +216,60 @@ it('rejects an incomplete, malformed or unacknowledged attendance transfer', fun
     ], LaravelZkteco::ERROR_UNAUTHORIZED],
 ]);
 
+it('reads legacy numbered attendance packets and can issue the next clock command', function () {
+    $stream = '';
+    for ($i = 0; $i < 30; $i++) {
+        $stream .= pack('v', 42 + $i).str_pad('00123', 24, "\0")
+            .pack('CVC', 1, 864142506, 0).str_repeat("\0", 8);
+    }
+    $stream = pack('V', strlen($stream)).$stream;
+    $response = function (int $reply) use ($stream): array {
+        $packets = [terminalReply(Util::CMD_PREPARE_DATA, $reply, 1, pack('VV', strlen($stream), 1024))];
+        foreach (str_split($stream, 1024) as $index => $payload) {
+            $packets[] = terminalReply(Util::CMD_DATA, $reply, $index, $payload);
+        }
+        $packets[] = terminalReply(Util::CMD_ACK_OK, $reply, strlen($stream));
+
+        return $packets;
+    };
+    withFakeTerminal([
+        successfulConnection(),
+        fn (int $reply): array => [terminalReply(Util::CMD_ACK_OK, $reply, 1, pack('V', 864142506))],
+        $response,
+        fn (): array => [terminalReply(Util::CMD_ACK_OK, 3)],
+    ], function (LaravelZkteco $reader) {
+        $reader->connect();
+        $reader->getTime();
+
+        $records = $reader->getAttendance();
+        $written = $reader->setTime('2026-11-20 15:35:06');
+
+        expect($records)->toHaveCount(30);
+        expect($records[0])->toBe(['uid' => 42, 'id' => '00123', 'state' => 1, 'timestamp' => '2026-11-20 15:35:06', 'type' => 0]);
+        expect($records[29]['uid'])->toBe(71);
+        expect($written)->toBeTrue();
+    });
+});
+
+it('rejects malformed legacy attendance transfers', function (string $fault) {
+    $record = pack('v', 42).str_pad('00123', 24, "\0")
+        .pack('CVC', 1, 864142506, 0).str_repeat("\0", 8);
+    $stream = pack('V', $fault === 'record length' ? 1240 : 1200).str_repeat($record, 30);
+    $response = function (int $reply) use ($stream, $fault): array {
+        return [
+            terminalReply(Util::CMD_PREPARE_DATA, $reply, 1, pack('VV', strlen($stream), $fault === 'chunk size' ? 2048 : 1024)),
+            terminalReply(Util::CMD_DATA, $fault === 'reply' ? 2 : 1, 0, substr($stream, 0, $fault === 'short packet' ? 1000 : 1024)),
+            terminalReply(Util::CMD_DATA, 1, $fault === 'sequence' ? 0 : 1, substr($stream, 1024)),
+            terminalReply(Util::CMD_ACK_OK, 1, strlen($stream) + ($fault === 'completion size' ? 1 : 0)),
+        ];
+    };
+    withFakeTerminal([successfulConnection(), $response], function (LaravelZkteco $reader) {
+        $reader->connect();
+
+        expect(fn () => $reader->getAttendance())->toThrow(RuntimeException::class);
+    });
+})->with(['sequence', 'reply', 'short packet', 'completion size', 'record length', 'chunk size']);
+
 it('bounds the entire transfer even when packets continue to arrive', function () {
     $response = fn (int $reply): array => [
         terminalReply(Util::CMD_PREPARE_DATA, $reply, 1, pack('V', 100)),

@@ -22,24 +22,28 @@ class Attendance
             throw new RuntimeException('Terminal attendance request failed.', LaravelZkteco::ERROR_PROTOCOL);
         }
 
+        $legacy = strlen($self->_data_recv) === 16;
         $attData = Util::recData($self);
 
         $attendance = [];
         if (! empty($attData)) {
-            if (strlen($attData) < 50 || (strlen($attData) - 10) % 40 !== 0) {
+            $prefix = $legacy ? 12 : 10;
+            if (strlen($attData) < $prefix || (strlen($attData) - $prefix) % 40 !== 0
+                || ($legacy && unpack('V', substr($attData, 8, 4))[1] !== strlen($attData) - $prefix)) {
                 throw new RuntimeException('Incomplete terminal attendance records.', LaravelZkteco::ERROR_PROTOCOL);
             }
-            $attData = substr($attData, 10);
+            $attData = substr($attData, $prefix);
+            $recordOffset = $legacy ? 0 : 2;
 
             for ($offset = 0, $length = strlen($attData); $offset < $length; $offset += 40) {
                 $self->assertOperationActive();
                 $record = substr($attData, $offset, 40);
-                $uid = unpack('v', substr($record, 2, 2))[1];
-                $id = substr($record, 4, 9);
+                $uid = unpack('v', substr($record, $recordOffset, 2))[1];
+                $id = substr($record, $recordOffset + 2, 9);
                 $id = str_replace(chr(0), '', $id);
-                $state = ord($record[28]);
-                $timestamp = Util::decodeTime(unpack('V', substr($record, 29, 4))[1]);
-                $type = ord($record[33]);
+                $state = ord($record[$recordOffset + 26]);
+                $timestamp = Util::decodeTime(unpack('V', substr($record, $recordOffset + 27, 4))[1]);
+                $type = ord($record[$recordOffset + 31]);
 
                 $attendance[] = [
                     'uid' => $uid,

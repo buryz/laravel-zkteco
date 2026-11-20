@@ -127,7 +127,7 @@ class LaravelZkteco
         if ($command === Util::CMD_CONNECT && ($header['command'] !== Util::CMD_ACK_OK || $header['session'] === 0)) {
             throw new RuntimeException('Invalid terminal connection response.', self::ERROR_PROTOCOL);
         }
-        if ($header['command'] === Util::CMD_PREPARE_DATA && strlen($packet) !== 12) {
+        if ($header['command'] === Util::CMD_PREPARE_DATA && ! in_array(strlen($packet), [12, 16], true)) {
             throw new RuntimeException('Invalid terminal transfer size response.', self::ERROR_PROTOCOL);
         }
 

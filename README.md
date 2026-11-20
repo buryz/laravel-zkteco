@@ -14,6 +14,12 @@ The Laravel ZKTeco package provides an easy way to integrate ZKTeco biometric de
 
 This fork is configured for Laravel 13 while retaining the declared Laravel 10, 11, and 12 compatibility. The test workflow targets Laravel 13 on PHP 8.4. Device and firmware compatibility still needs to be verified against the specific ZKTeco terminal.
 
+Attendance downloads also support the legacy UDP format observed on firmware
+`Ver 6.70 Aug 27 2014`: a 16-byte preparation response, numbered 1024-byte
+data packets, a byte-count completion acknowledgement, and length-prefixed
+40-byte records. Packet order, declared lengths, and transfer completion are
+validated; an interrupted download is not returned as an empty attendance list.
+
 ## Features
 -   **Easy Integration:** Seamlessly connect your Laravel application with ZKTeco biometric devices.
 -   **Attendance Management:** Fetch and manage attendance logs from connected devices.
