@@ -17,9 +17,9 @@ class Fingerprint
         $self->_section = __METHOD__;
 
         $data = [];
-        //fingers of the hands
+        // fingers of the hands
         for ($i = 0; $i <= 9; $i++) {
-            $finger = new Fingerprint();
+            $finger = new Fingerprint;
             $tmp = $finger->_getFinger($self, $uid, $i);
             if ($tmp['size'] > 0) {
                 $data[$i] = $tmp['tpl'];
@@ -81,7 +81,7 @@ class Fingerprint
         $count = 0;
         foreach ($data as $finger => $item) {
             $allowSet = true;
-            $fingerPrint = new Fingerprint();
+            $fingerPrint = new Fingerprint;
             if ($fingerPrint->_checkFinger($self, $uid, $finger) === true) {
                 $allowSet = $fingerPrint->_removeFinger($self, $uid, $finger);
             }
@@ -116,7 +116,7 @@ class Fingerprint
 
         $count = 0;
         foreach ($data as $finger) {
-            $fingerPrint = new Fingerprint();
+            $fingerPrint = new Fingerprint;
             if ($fingerPrint->_checkFinger($self, $uid, $finger) === true) {
                 if ($fingerPrint->_removeFinger($self, $uid, $finger) === true) {
                     $count++;
@@ -140,7 +140,7 @@ class Fingerprint
         $command_string = ($byte1.$byte2).chr($finger);
 
         $self->_command($command, $command_string);
-        $fingerPrint = new Fingerprint();
+        $fingerPrint = new Fingerprint;
 
         return ! ($fingerPrint->_checkFinger($self, $uid, $finger));
     }
@@ -152,7 +152,7 @@ class Fingerprint
      */
     private function _checkFinger(LaravelZkteco $self, $uid, $finger)
     {
-        $fingerPrint = new Fingerprint();
+        $fingerPrint = new Fingerprint;
         $res = $fingerPrint->_getFinger($self, $uid, $finger);
 
         return (bool) ($res['size'] > 0);

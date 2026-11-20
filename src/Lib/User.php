@@ -84,7 +84,7 @@ class User
                 $name = hex2bin(substr($u[1], 24, 74)).' ';
                 $userid = hex2bin(substr($u[1], 98, 72)).' ';
 
-                //Clean up some messy characters from the user name
+                // Clean up some messy characters from the user name
                 $password = explode(chr(0), $password, 2);
                 $password = $password[0];
                 $userid = explode(chr(0), $userid, 2);
