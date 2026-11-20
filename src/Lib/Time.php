@@ -3,6 +3,7 @@
 namespace MehediJaman\LaravelZkteco\Lib;
 
 use MehediJaman\LaravelZkteco\LaravelZkteco;
+use RuntimeException;
 
 class Time
 {
@@ -15,9 +16,14 @@ class Time
         $self->_section = __METHOD__;
 
         $command = Util::CMD_SET_TIME;
-        $command_string = pack('I', Util::encodeTime($t));
+        $command_string = pack('V', Util::encodeTime($t));
 
-        return $self->_command($command, $command_string);
+        $self->_command($command, $command_string);
+        if (! Util::checkValid($self->_data_recv)) {
+            throw new RuntimeException('Terminal did not acknowledge the time update.', LaravelZkteco::ERROR_PROTOCOL);
+        }
+
+        return true;
     }
 
     /**
@@ -32,10 +38,10 @@ class Time
 
         $ret = $self->_command($command, $command_string);
 
-        if ($ret) {
-            return Util::decodeTime(hexdec(Util::reverseHex(bin2hex($ret))));
-        } else {
-            return false;
+        if (strlen($ret) !== 4) {
+            throw new RuntimeException('Invalid terminal time response.', LaravelZkteco::ERROR_PROTOCOL);
         }
+
+        return Util::decodeTime(unpack('V', $ret)[1]);
     }
 }

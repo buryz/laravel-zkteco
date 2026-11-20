@@ -3,6 +3,7 @@
 namespace MehediJaman\LaravelZkteco\Lib;
 
 use MehediJaman\LaravelZkteco\LaravelZkteco;
+use RuntimeException;
 
 class Attendance
 {
@@ -18,26 +19,27 @@ class Attendance
 
         $session = $self->_command($command, $command_string, Util::COMMAND_TYPE_DATA);
         if ($session === false) {
-            return [];
+            throw new RuntimeException('Terminal attendance request failed.', LaravelZkteco::ERROR_PROTOCOL);
         }
 
         $attData = Util::recData($self);
 
         $attendance = [];
         if (! empty($attData)) {
+            if (strlen($attData) < 50 || (strlen($attData) - 10) % 40 !== 0) {
+                throw new RuntimeException('Incomplete terminal attendance records.', LaravelZkteco::ERROR_PROTOCOL);
+            }
             $attData = substr($attData, 10);
 
-            while (strlen($attData) > 40) {
-                $u = unpack('H78', substr($attData, 0, 39));
-
-                $u1 = hexdec(substr($u[1], 4, 2));
-                $u2 = hexdec(substr($u[1], 6, 2));
-                $uid = $u1 + ($u2 * 256);
-                $id = hex2bin(substr($u[1], 8, 18));
+            for ($offset = 0, $length = strlen($attData); $offset < $length; $offset += 40) {
+                $self->assertOperationActive();
+                $record = substr($attData, $offset, 40);
+                $uid = unpack('v', substr($record, 2, 2))[1];
+                $id = substr($record, 4, 9);
                 $id = str_replace(chr(0), '', $id);
-                $state = hexdec(substr($u[1], 56, 2));
-                $timestamp = Util::decodeTime(hexdec(Util::reverseHex(substr($u[1], 58, 8))));
-                $type = hexdec(Util::reverseHex(substr($u[1], 66, 2)));
+                $state = ord($record[28]);
+                $timestamp = Util::decodeTime(unpack('V', substr($record, 29, 4))[1]);
+                $type = ord($record[33]);
 
                 $attendance[] = [
                     'uid' => $uid,
@@ -47,10 +49,11 @@ class Attendance
                     'type' => $type,
                 ];
 
-                $attData = substr($attData, 40);
             }
 
         }
+
+        $self->assertOperationActive();
 
         return $attendance;
     }

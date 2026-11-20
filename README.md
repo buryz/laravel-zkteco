@@ -1,12 +1,18 @@
 # Laravel ZKTeco Integration
 
-[![Latest Version on Packagist](https://img.shields.io/packagist/v/mehedijaman/laravel-zkteco.svg?style=flat-square)](https://packagist.org/packages/mehedijaman/laravel-zkteco)
-[![GitHub Tests Action Status](https://img.shields.io/github/actions/workflow/status/mehedijaman/laravel-zkteco/run-tests.yml?branch=main&label=tests&style=flat-square)](https://github.com/mehedijaman/laravel-zkteco/actions?query=workflow%3Arun-tests+branch%3Amain)
-[![GitHub Code Style Action Status](https://img.shields.io/github/actions/workflow/status/mehedijaman/laravel-zkteco/fix-php-code-style-issues.yml?branch=main&label=code%20style&style=flat-square)](https://github.com/mehedijaman/laravel-zkteco/actions?query=workflow%3A"Fix+PHP+code+style+issues"+branch%3Amain)
-[![Total Downloads](https://img.shields.io/packagist/dt/mehedijaman/laravel-zkteco.svg?style=flat-square)](https://packagist.org/packages/mehedijaman/laravel-zkteco)
+[![GitHub Tests Action Status](https://img.shields.io/github/actions/workflow/status/buryz/laravel-zkteco/run-tests.yml?branch=laravel-13-compat&label=tests&style=flat-square)](https://github.com/buryz/laravel-zkteco/actions)
+
+Laravel 13 compatibility fork of [mehedijaman/laravel-zkteco](https://github.com/mehedijaman/laravel-zkteco).
+The original author attribution and MIT license are retained. The Composer name
+remains `mehedijaman/laravel-zkteco` so existing imports and dependencies work;
+install this fork through the VCS repository below, not the upstream Packagist release.
 
 ## Overview
 The Laravel ZKTeco package provides an easy way to integrate ZKTeco biometric devices with your Laravel application. This package simplifies the process of connecting to ZKTeco devices, fetching attendance logs, and managing user data.
+
+## Laravel compatibility
+
+This fork is configured for Laravel 13 while retaining the declared Laravel 10, 11, and 12 compatibility. The test workflow targets Laravel 13 on PHP 8.4. Device and firmware compatibility still needs to be verified against the specific ZKTeco terminal.
 
 ## Features
 -   **Easy Integration:** Seamlessly connect your Laravel application with ZKTeco biometric devices.
@@ -16,11 +22,14 @@ The Laravel ZKTeco package provides an easy way to integrate ZKTeco biometric de
 
 ## Installation
 
-You can install the package via composer:
+Install the fork from its Laravel 13 branch:
 
 ```bash
-composer require mehedijaman/laravel-zkteco
+composer config repositories.zkteco vcs https://github.com/buryz/laravel-zkteco
+composer require mehedijaman/laravel-zkteco:dev-laravel-13-compat
 ```
+Commit the application's `composer.lock` and use `composer install` for deployment
+to reproduce the tested commit. No Packagist publication is required.
 The package is designed to automatically register itself upon installation.
 
 Please ensure that the PHP sockets extension is enabled on your server. If it is not enabled, you will need to activate it.
@@ -70,6 +79,51 @@ Instantiate the LaravelZkteco Object.
 use MehediJaman\LaravelZkteco\LaravelZkteco;
 $zk = new LaravelZkteco('ipaddress', 'port');
 ```
+
+For bounded reader operations, pass the receive timeout and the total operation
+timeout (seconds) as the third and fourth arguments:
+
+```php
+$zk = new LaravelZkteco('192.0.2.10', 4370, 3, 40);
+try {
+    $zk->connect();
+    $serial = $zk->serialNumber();
+    $firmware = $zk->version();
+    $time = $zk->getTime();
+    $events = $zk->getAttendance();
+    // $zk->setTime('2026-11-20 15:35:06');
+} finally {
+    try {
+        if ($zk->_session_id !== 0) {
+            $zk->disconnect();
+        }
+    } finally {
+        $zk->close();
+    }
+}
+```
+
+The total deadline starts at construction and covers subsequent commands and
+attendance processing; it is not renewed per command. Without a fourth
+argument, each command and each attendance transfer is separately bounded by
+the receive timeout (default 60.5 seconds). Closing the socket does not send a
+disconnect command. Disconnect can itself fail or time out, including when the
+operation deadline is exhausted, so always close the socket in `finally`.
+
+Transport and protocol failures throw `RuntimeException`. Its code is one of
+`LaravelZkteco::ERROR_TIMEOUT`, `ERROR_UNAUTHORIZED`, `ERROR_PROTOCOL`,
+`ERROR_REJECTED`, `ERROR_SOCKET`, or `ERROR_INCOMPLETE_TRANSFER`. A successful
+`getAttendance()` returns an array; `[]` means an acknowledged empty transfer,
+not a timeout or partial transfer. `setTime()` returns `true` only for an OK
+acknowledgement; an empty payload is valid. An acknowledgement does not prove
+the clock was set: read it back. A timeout after sending a write leaves its
+effect unknown; do not retry blindly.
+
+Times are timezone-free terminal wall-clock strings in `Y-m-d H:i:s` format,
+not UTC instants. The caller must handle timezone and DST ambiguity. The
+attendance reader supports the existing 40-byte record layout and rejects
+incomplete or unsupported framing. The transfer framing and compatibility with
+individual terminal firmware still require validation on a physical reader.
 
 
 Call ZKTeco methods
@@ -234,9 +288,9 @@ Call ZKTeco methods
 ```php
 //    set device time
 //    parameter string $t Format: "Y-m-d H:i:s"
-//    return bool/mixed
+//    returns true on acknowledged success; throws on transport/protocol failure
 
-    $zk->setTime(); 
+    $zk->setTime('2026-11-20 15:35:06');
 ```
 
 * __Get Users__ 

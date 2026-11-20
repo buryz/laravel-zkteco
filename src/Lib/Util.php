@@ -3,6 +3,7 @@
 namespace MehediJaman\LaravelZkteco\Lib;
 
 use MehediJaman\LaravelZkteco\LaravelZkteco;
+use RuntimeException;
 
 class Util
 {
@@ -119,18 +120,16 @@ class Util
      */
     public static function encodeTime($t)
     {
-        $timestamp = strtotime($t);
-        $t = (object) [
-            'year' => (int) date('Y', $timestamp),
-            'month' => (int) date('m', $timestamp),
-            'day' => (int) date('d', $timestamp),
-            'hour' => (int) date('H', $timestamp),
-            'minute' => (int) date('i', $timestamp),
-            'second' => (int) date('s', $timestamp),
-        ];
+        if (! is_string($t) || ! preg_match('/\A(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})\z/', $t, $parts)) {
+            throw new \InvalidArgumentException('Terminal time must use Y-m-d H:i:s.');
+        }
+        [, $year, $month, $day, $hour, $minute, $second] = array_map('intval', $parts);
+        if ($year < 2000 || $year > 2099 || ! checkdate($month, $day, $year) || $hour > 23 || $minute > 59 || $second > 59) {
+            throw new \InvalidArgumentException('Invalid terminal wall clock time.');
+        }
 
-        $d = (($t->year % 100) * 12 * 31 + (($t->month - 1) * 31) + $t->day - 1) *
-          (24 * 60 * 60) + ($t->hour * 60 + $t->minute) * 60 + $t->second;
+        $d = (($year % 100) * 12 * 31 + (($month - 1) * 31) + $day - 1) *
+          (24 * 60 * 60) + ($hour * 60 + $minute) * 60 + $second;
 
         return $d;
     }
@@ -144,28 +143,30 @@ class Util
      */
     public static function decodeTime($t)
     {
+        $t = (int) $t;
+        if ($t < 0) {
+            throw new RuntimeException('Invalid terminal wall clock time.', LaravelZkteco::ERROR_PROTOCOL);
+        }
         $second = $t % 60;
-        $t = $t / 60;
+        $t = intdiv($t, 60);
 
         $minute = $t % 60;
-        $t = $t / 60;
+        $t = intdiv($t, 60);
 
         $hour = $t % 24;
-        $t = $t / 24;
+        $t = intdiv($t, 24);
 
         $day = $t % 31 + 1;
-        $t = $t / 31;
+        $t = intdiv($t, 31);
 
         $month = $t % 12 + 1;
-        $t = $t / 12;
+        $year = intdiv($t, 12) + 2000;
 
-        $year = floor($t + 2000);
+        if ($year > 2099 || ! checkdate($month, $day, $year)) {
+            throw new RuntimeException('Invalid terminal wall clock time.', LaravelZkteco::ERROR_PROTOCOL);
+        }
 
-        $d = date('Y-m-d H:i:s', strtotime(
-            $year.'-'.$month.'-'.$day.' '.$hour.':'.$minute.':'.$second
-        ));
-
-        return $d;
+        return sprintf('%04d-%02d-%02d %02d:%02d:%02d', $year, $month, $day, $hour, $minute, $second);
     }
 
     /**
@@ -193,14 +194,15 @@ class Util
      */
     public static function getSize(LaravelZkteco $self)
     {
-        $u = unpack('H2h1/H2h2/H2h3/H2h4/H2h5/H2h6/H2h7/H2h8', substr($self->_data_recv, 0, 8));
-        $command = hexdec($u['h2'].$u['h1']);
+        $header = $self->validatePacket($self->_data_recv, $self->_session_id);
+        $command = $header['command'];
 
         if ($command == self::CMD_PREPARE_DATA) {
-            $u = unpack('H2h1/H2h2/H2h3/H2h4', substr($self->_data_recv, 8, 4));
-            $size = hexdec($u['h4'].$u['h3'].$u['h2'].$u['h1']);
+            if (strlen($self->_data_recv) !== 12) {
+                throw new RuntimeException('Invalid terminal transfer size response.', LaravelZkteco::ERROR_PROTOCOL);
+            }
 
-            return $size;
+            return unpack('V', substr($self->_data_recv, 8, 4))[1];
         } else {
             return false;
         }
@@ -286,15 +288,7 @@ class Util
      */
     public static function checkValid($reply)
     {
-        $u = unpack('H2h1/H2h2', substr($reply, 0, 8));
-
-        $command = hexdec($u['h2'].$u['h1']);
-        /** TODO: Some device can return 'Connection unauthorized' then should check also */
-        if ($command == self::CMD_ACK_OK || $command == self::CMD_ACK_UNAUTH) {
-            return true;
-        } else {
-            return false;
-        }
+        return strlen($reply) >= 8 && unpack('v', substr($reply, 0, 2))[1] === self::CMD_ACK_OK;
     }
 
     /**
@@ -375,54 +369,75 @@ class Util
     /**
      * Receive data from device
      *
-     * @param  int  $maxErrors
+     * @param  int  $maxErrors  Retained for compatibility; receive errors are not retried
      * @param  bool  $first  if 'true' don't remove first 4 bytes for first row
      * @return string
      */
     public static function recData(LaravelZkteco $self, $maxErrors = 10, $first = true)
     {
-        $data = '';
+        $self->assertOperationActive();
         $bytes = self::getSize($self);
-
-        if ($bytes) {
-            $received = 0;
-            $errors = 0;
-
-            while ($bytes > $received) {
-                $ret = @socket_recvfrom($self->_zkclient, $dataRec, 1032, 0, $self->_ip, $self->_port);
-
-                if ($ret === false) {
-                    if ($errors < $maxErrors) {
-                        //try again if false
-                        $errors++;
-                        sleep(1);
-
-                        continue;
-                    } else {
-                        //return empty if has maximum count of errors
-                        self::logReceived($self, $received, $bytes);
-                        unset($data);
-
-                        return '';
-                    }
-                }
-
-                if ($first === false) {
-                    //The first 4 bytes don't seem to be related to the user
-                    $dataRec = substr($dataRec, 8);
-                }
-
-                $data .= $dataRec;
-                $received += strlen($dataRec);
-
-                unset($dataRec);
-                $first = false;
+        if ($bytes === false) {
+            if (strlen($self->_data_recv) !== 8 || ! self::checkValid($self->_data_recv)) {
+                throw new RuntimeException('Invalid empty terminal transfer response.', LaravelZkteco::ERROR_PROTOCOL);
             }
 
-            //flush socket
-            @socket_recvfrom($self->_zkclient, $dataRec, 1024, 0, $self->_ip, $self->_port);
-            unset($dataRec);
+            return '';
         }
+        if ($bytes === 0) {
+            return '';
+        }
+        if ($bytes > 64 * 1024 * 1024) {
+            throw new RuntimeException('Terminal transfer exceeds the maximum size.', LaravelZkteco::ERROR_PROTOCOL);
+        }
+        $data = '';
+        $received = 0;
+        $deadline = $self->transferDeadline();
+        $receive = static function () use ($self, $deadline): string {
+            try {
+                return $self->receivePacket($deadline);
+            } catch (RuntimeException $exception) {
+                if ($exception->getCode() === LaravelZkteco::ERROR_TIMEOUT) {
+                    throw new RuntimeException('Terminal transfer did not complete before the timeout.', LaravelZkteco::ERROR_INCOMPLETE_TRANSFER, $exception);
+                }
+
+                throw $exception;
+            }
+        };
+        while ($received < $bytes) {
+            $packet = $receive();
+            $header = $self->validatePacket($packet, $self->_session_id);
+            if ($header['command'] === self::CMD_ACK_UNAUTH) {
+                throw new RuntimeException('Terminal access is unauthorized.', LaravelZkteco::ERROR_UNAUTHORIZED);
+            }
+            if ($header['command'] === self::CMD_ACK_ERROR) {
+                throw new RuntimeException('Terminal rejected the transfer.', LaravelZkteco::ERROR_REJECTED);
+            }
+            if ($header['command'] !== self::CMD_DATA || strlen($packet) === 8) {
+                throw new RuntimeException('Invalid terminal transfer packet.', LaravelZkteco::ERROR_PROTOCOL);
+            }
+            $payload = substr($packet, 8);
+            $data .= $first ? $packet : $payload;
+            $received += strlen($payload);
+            $first = false;
+            if ($received > $bytes) {
+                throw new RuntimeException('Terminal transfer exceeds its declared size.', LaravelZkteco::ERROR_PROTOCOL);
+            }
+        }
+
+        $packet = $receive();
+        $header = $self->validatePacket($packet, $self->_session_id);
+        if ($header['command'] === self::CMD_ACK_UNAUTH) {
+            throw new RuntimeException('Terminal access is unauthorized.', LaravelZkteco::ERROR_UNAUTHORIZED);
+        }
+        if ($header['command'] === self::CMD_ACK_ERROR) {
+            throw new RuntimeException('Terminal rejected the transfer.', LaravelZkteco::ERROR_REJECTED);
+        }
+        if ($header['command'] !== self::CMD_ACK_OK || strlen($packet) !== 8) {
+            throw new RuntimeException('Invalid terminal transfer completion acknowledgement.', LaravelZkteco::ERROR_PROTOCOL);
+        }
+        $self->_data_recv = $packet;
+        $self->rememberReply($header['reply']);
 
         return $data;
     }
@@ -444,7 +459,7 @@ class Util
     private static function logger(LaravelZkteco $self, $str)
     {
         if (defined('ZK_LIB_LOG')) {
-            //use constant if defined
+            // use constant if defined
             $log = ZK_LIB_LOG;
         } else {
             $dir = dirname(dirname(__FILE__));

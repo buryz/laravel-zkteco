@@ -2,8 +2,6 @@
 
 namespace MehediJaman\LaravelZkteco;
 
-use ErrorException;
-use Exception;
 use MehediJaman\LaravelZkteco\Lib\Attendance;
 use MehediJaman\LaravelZkteco\Lib\Connect;
 use MehediJaman\LaravelZkteco\Lib\Device;
@@ -19,9 +17,28 @@ use MehediJaman\LaravelZkteco\Lib\User;
 use MehediJaman\LaravelZkteco\Lib\Util;
 use MehediJaman\LaravelZkteco\Lib\Version;
 use MehediJaman\LaravelZkteco\Lib\WorkCode;
+use RuntimeException;
 
 class LaravelZkteco
 {
+    public const ERROR_TIMEOUT = 1;
+
+    public const ERROR_UNAUTHORIZED = 2;
+
+    public const ERROR_PROTOCOL = 3;
+
+    public const ERROR_REJECTED = 4;
+
+    public const ERROR_SOCKET = 5;
+
+    public const ERROR_INCOMPLETE_TRANSFER = 6;
+
+    private float $timeoutSeconds;
+
+    private ?float $operationDeadline;
+
+    private int $replyId = Util::USHRT_MAX - 1;
+
     public $_ip;
 
     public $_port;
@@ -39,17 +56,27 @@ class LaravelZkteco
      *
      * @param  string  $ip  Device IP
      * @param  int  $port  Default: 4370
+     * @param  float  $timeoutSeconds  Maximum wait per response
+     * @param  ?float  $operationTimeoutSeconds  Total deadline from construction, or null
      */
-    public function __construct($ip, $port = 4370)
+    public function __construct($ip, $port = 4370, $timeoutSeconds = 60.5, $operationTimeoutSeconds = null)
     {
+        if (! is_numeric($timeoutSeconds) || ! is_finite((float) $timeoutSeconds) || $timeoutSeconds <= 0) {
+            throw new \InvalidArgumentException('Timeout must be a positive finite number of seconds.');
+        }
+        if ($operationTimeoutSeconds !== null && (! is_numeric($operationTimeoutSeconds) || ! is_finite((float) $operationTimeoutSeconds) || $operationTimeoutSeconds <= 0)) {
+            throw new \InvalidArgumentException('Operation timeout must be a positive finite number of seconds.');
+        }
+
         $this->_ip = $ip;
         $this->_port = $port;
+        $this->timeoutSeconds = (float) $timeoutSeconds;
+        $this->operationDeadline = $operationTimeoutSeconds === null ? null : hrtime(true) / 1e9 + (float) $operationTimeoutSeconds;
 
-        $this->_zkclient = socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
-
-        $timeout = ['sec' => 60, 'usec' => 500000];
-        socket_set_option($this->_zkclient, SOL_SOCKET, SO_RCVTIMEO, $timeout);
-
+        $this->_zkclient = @socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
+        if ($this->_zkclient === false) {
+            throw new RuntimeException('Unable to create terminal socket.', self::ERROR_SOCKET);
+        }
     }
 
     /**
@@ -62,36 +89,139 @@ class LaravelZkteco
      */
     public function _command($command, $command_string, $type = Util::COMMAND_TYPE_GENERAL)
     {
-        $chksum = 0;
         $session_id = $this->_session_id;
-
-        $u = unpack('H2h1/H2h2/H2h3/H2h4/H2h5/H2h6/H2h7/H2h8', substr($this->_data_recv, 0, 8));
-        $reply_id = hexdec($u['h8'].$u['h7']);
-
-        $buf = Util::createHeader($command, $chksum, $session_id, $reply_id, $command_string);
-
-        socket_sendto($this->_zkclient, $buf, strlen($buf), 0, $this->_ip, $this->_port);
-
-        try {
-            @socket_recvfrom($this->_zkclient, $this->_data_recv, 1024, 0, $this->_ip, $this->_port);
-
-            $u = unpack('H2h1/H2h2/H2h3/H2h4/H2h5/H2h6', substr($this->_data_recv, 0, 8));
-
-            $ret = false;
-            $session = hexdec($u['h6'].$u['h5']);
-
-            if ($type === Util::COMMAND_TYPE_GENERAL && $session_id === $session) {
-                $ret = substr($this->_data_recv, 8);
-            } elseif ($type === Util::COMMAND_TYPE_DATA && ! empty($session)) {
-                $ret = $session;
-            }
-
-            return $ret;
-        } catch (ErrorException $e) {
-            return false;
-        } catch (Exception $e) {
-            return false;
+        if ($command !== Util::CMD_CONNECT && $session_id === 0) {
+            throw new RuntimeException('Terminal session is not connected.', self::ERROR_PROTOCOL);
         }
+
+        $buf = Util::createHeader($command, 0, $session_id, $this->replyId, $command_string);
+        $expectedReply = unpack('v', substr($buf, 6, 2))[1];
+        $this->replyId = $expectedReply;
+        $this->_data_recv = '';
+
+        if (! $this->_zkclient instanceof \Socket) {
+            throw new RuntimeException('Terminal socket is closed.', self::ERROR_SOCKET);
+        }
+        $deadline = $this->deadline();
+        if (@socket_sendto($this->_zkclient, $buf, strlen($buf), 0, $this->_ip, $this->_port) !== strlen($buf)) {
+            throw new RuntimeException('Unable to send terminal command.', self::ERROR_SOCKET);
+        }
+
+        $packet = $this->receivePacket($deadline);
+        $header = $this->validatePacket($packet, $command === Util::CMD_CONNECT ? null : $session_id);
+        if ($header['reply'] !== $expectedReply) {
+            throw new RuntimeException('Unexpected terminal reply identifier.', self::ERROR_PROTOCOL);
+        }
+        if ($header['command'] === Util::CMD_ACK_UNAUTH) {
+            throw new RuntimeException('Terminal access is unauthorized.', self::ERROR_UNAUTHORIZED);
+        }
+        if ($header['command'] === Util::CMD_ACK_ERROR) {
+            throw new RuntimeException('Terminal rejected the command.', self::ERROR_REJECTED);
+        }
+        $allowed = $type === Util::COMMAND_TYPE_DATA
+            ? [Util::CMD_PREPARE_DATA, Util::CMD_ACK_OK]
+            : [Util::CMD_ACK_OK, Util::CMD_ACK_DATA];
+        if (! in_array($header['command'], $allowed, true)) {
+            throw new RuntimeException('Unexpected terminal acknowledgement.', self::ERROR_PROTOCOL);
+        }
+        if ($command === Util::CMD_CONNECT && ($header['command'] !== Util::CMD_ACK_OK || $header['session'] === 0)) {
+            throw new RuntimeException('Invalid terminal connection response.', self::ERROR_PROTOCOL);
+        }
+        if ($header['command'] === Util::CMD_PREPARE_DATA && strlen($packet) !== 12) {
+            throw new RuntimeException('Invalid terminal transfer size response.', self::ERROR_PROTOCOL);
+        }
+
+        $this->_data_recv = $packet;
+        $this->assertOperationActive();
+
+        return $type === Util::COMMAND_TYPE_DATA ? $header['session'] : substr($packet, 8);
+    }
+
+    public function deadline(): float
+    {
+        $now = hrtime(true) / 1e9;
+        $this->assertOperationActive();
+
+        return min($now + $this->timeoutSeconds, $this->operationDeadline ?? INF);
+    }
+
+    public function assertOperationActive(): void
+    {
+        $now = hrtime(true) / 1e9;
+        if ($this->operationDeadline !== null && $now >= $this->operationDeadline) {
+            throw new RuntimeException('Terminal operation timed out.', self::ERROR_TIMEOUT);
+        }
+    }
+
+    public function transferDeadline(): float
+    {
+        return $this->operationDeadline ?? $this->deadline();
+    }
+
+    public function rememberReply(int $replyId): void
+    {
+        $this->replyId = $replyId;
+    }
+
+    public function receivePacket(float $deadline): string
+    {
+        $deadline = min($deadline, $this->deadline());
+        while (true) {
+            $remaining = $deadline - hrtime(true) / 1e9;
+            if ($remaining <= 0) {
+                throw new RuntimeException('Terminal response timed out.', self::ERROR_TIMEOUT);
+            }
+            $read = [$this->_zkclient];
+            $write = null;
+            $except = null;
+            $seconds = (int) $remaining;
+            $microseconds = (int) (($remaining - $seconds) * 1_000_000);
+            $ready = @socket_select($read, $write, $except, $seconds, $microseconds);
+            if ($ready === false) {
+                throw new RuntimeException('Unable to wait for terminal response.', self::ERROR_SOCKET);
+            }
+            if ($ready === 0) {
+                continue;
+            }
+            $address = '';
+            $port = 0;
+            $packet = '';
+            if (@socket_recvfrom($this->_zkclient, $packet, 65535, 0, $address, $port) === false) {
+                throw new RuntimeException('Unable to receive terminal response.', self::ERROR_SOCKET);
+            }
+            if ($address === $this->_ip && $port === (int) $this->_port) {
+                if (hrtime(true) / 1e9 >= $deadline) {
+                    throw new RuntimeException('Terminal response timed out.', self::ERROR_TIMEOUT);
+                }
+                $this->assertOperationActive();
+
+                return $packet;
+            }
+        }
+    }
+
+    /** @return array{command: int, checksum: int, session: int, reply: int} */
+    public function validatePacket(string $packet, ?int $session): array
+    {
+        if (strlen($packet) < 8) {
+            throw new RuntimeException('Truncated terminal packet.', self::ERROR_PROTOCOL);
+        }
+        $header = unpack('vcommand/vchecksum/vsession/vreply', $packet);
+        if ($session !== null && $header['session'] !== $session) {
+            throw new RuntimeException('Unexpected terminal session.', self::ERROR_PROTOCOL);
+        }
+
+        return $header;
+    }
+
+    public function close(): void
+    {
+        if ($this->_zkclient instanceof \Socket) {
+            socket_close($this->_zkclient);
+            $this->_zkclient = null;
+        }
+        $this->_session_id = 0;
+        $this->_data_recv = '';
     }
 
     /**
