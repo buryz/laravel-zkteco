@@ -262,7 +262,7 @@ class Util
      * This function puts a the parts that make up a packet together and
      * packs them into a byte string
      */
-    public static function communicationKey(int $key, int $session): string
+    public static function communicationKey(#[\SensitiveParameter] int $key, int $session): string
     {
         $reversed = 0;
         for ($bit = 0; $bit < 32; $bit++) {

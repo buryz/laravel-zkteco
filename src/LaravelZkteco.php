@@ -60,8 +60,9 @@ class LaravelZkteco
      * @param  int  $port  Default: 4370
      * @param  float  $timeoutSeconds  Maximum wait per response
      * @param  ?float  $operationTimeoutSeconds  Total deadline from construction, or null
+     * @param  ?int  $commKey  Optional terminal communication key
      */
-    public function __construct($ip, $port = 4370, $timeoutSeconds = 60.5, $operationTimeoutSeconds = null, ?int $commKey = null)
+    public function __construct($ip, $port = 4370, $timeoutSeconds = 60.5, $operationTimeoutSeconds = null, #[\SensitiveParameter] ?int $commKey = null)
     {
         if (! is_numeric($timeoutSeconds) || ! is_finite((float) $timeoutSeconds) || $timeoutSeconds <= 0) {
             throw new \InvalidArgumentException('Timeout must be a positive finite number of seconds.');
@@ -93,7 +94,7 @@ class LaravelZkteco
      * @param  string  $type
      * @return bool|mixed
      */
-    public function _command($command, $command_string, $type = Util::COMMAND_TYPE_GENERAL)
+    public function _command($command, #[\SensitiveParameter] $command_string, $type = Util::COMMAND_TYPE_GENERAL)
     {
         $session_id = $this->_session_id;
         if ($command !== Util::CMD_CONNECT && $session_id === 0) {
