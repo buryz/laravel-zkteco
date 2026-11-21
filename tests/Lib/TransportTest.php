@@ -3,7 +3,7 @@
 use MehediJaman\LaravelZkteco\LaravelZkteco;
 use MehediJaman\LaravelZkteco\Lib\Util;
 
-function withFakeTerminal(array $responses, Closure $test, float $timeout = 0.15, ?float $operationTimeout = null): void
+function withFakeTerminal(array $responses, Closure $test, float $timeout = 0.15, ?float $operationTimeout = null, ?int $commKey = null): void
 {
     $server = socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
     socket_bind($server, '127.0.0.1', 0);
@@ -31,7 +31,7 @@ function withFakeTerminal(array $responses, Closure $test, float $timeout = 0.15
         exit(0);
     }
     socket_close($server);
-    $reader = new LaravelZkteco('127.0.0.1', $port, $timeout, $operationTimeout);
+    $reader = new LaravelZkteco('127.0.0.1', $port, $timeout, $operationTimeout, $commKey);
     try {
         $test($reader);
     } finally {
@@ -50,6 +50,39 @@ function successfulConnection(): Closure
 {
     return fn (int $reply): array => [terminalReply(Util::CMD_ACK_OK, $reply)];
 }
+
+it('authenticates with the supplied communication key and continues the session', function () {
+    withFakeTerminal([
+        fn (int $reply): array => [terminalReply(Util::CMD_ACK_UNAUTH, $reply, 4660)],
+        function (int $reply, string $request): array {
+            if (unpack('v', substr($request, 0, 2))[1] !== Util::CMD_AUTH
+                || unpack('v', substr($request, 4, 2))[1] !== 4660
+                || bin2hex(substr($request, 8)) !== '4136326b') {
+                exit(2);
+            }
+
+            return [terminalReply(Util::CMD_ACK_OK, $reply, 4660)];
+        },
+        fn (int $reply): array => [terminalReply(Util::CMD_ACK_OK, $reply, 4660, 'firmware')],
+    ], function (LaravelZkteco $reader) {
+        expect($reader->connect())->toBeTrue();
+        expect($reader->version())->toBe('firmware');
+    }, commKey: 1234);
+});
+
+it('rejects a failed communication key without leaving a connected session', function () {
+    withFakeTerminal([
+        fn (int $reply): array => [terminalReply(Util::CMD_ACK_UNAUTH, $reply, 4660)],
+        fn (int $reply): array => [terminalReply(Util::CMD_ACK_UNAUTH, $reply, 4660)],
+    ], function (LaravelZkteco $reader) {
+        expect(fn () => $reader->connect())->toThrow(RuntimeException::class, 'unauthorized');
+        expect($reader->_session_id)->toBe(0);
+    }, commKey: 1234);
+});
+
+it('encodes communication keys using the device session', function (int $key, int $session, string $expected) {
+    expect(bin2hex(Util::communicationKey($key, $session)))->toBe($expected);
+})->with([[0, 1, '617d3279'], [1234, 4660, '4136326b'], [999999, 42, '23813289']]);
 
 it('rejects unauthorized and malformed connection responses', function (Closure $response, int $code) {
     withFakeTerminal([$response], function (LaravelZkteco $reader) use ($code) {

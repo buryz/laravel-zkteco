@@ -39,6 +39,8 @@ class LaravelZkteco
 
     private int $replyId = Util::USHRT_MAX - 1;
 
+    private ?int $commKey;
+
     public $_ip;
 
     public $_port;
@@ -59,7 +61,7 @@ class LaravelZkteco
      * @param  float  $timeoutSeconds  Maximum wait per response
      * @param  ?float  $operationTimeoutSeconds  Total deadline from construction, or null
      */
-    public function __construct($ip, $port = 4370, $timeoutSeconds = 60.5, $operationTimeoutSeconds = null)
+    public function __construct($ip, $port = 4370, $timeoutSeconds = 60.5, $operationTimeoutSeconds = null, ?int $commKey = null)
     {
         if (! is_numeric($timeoutSeconds) || ! is_finite((float) $timeoutSeconds) || $timeoutSeconds <= 0) {
             throw new \InvalidArgumentException('Timeout must be a positive finite number of seconds.');
@@ -67,10 +69,14 @@ class LaravelZkteco
         if ($operationTimeoutSeconds !== null && (! is_numeric($operationTimeoutSeconds) || ! is_finite((float) $operationTimeoutSeconds) || $operationTimeoutSeconds <= 0)) {
             throw new \InvalidArgumentException('Operation timeout must be a positive finite number of seconds.');
         }
+        if ($commKey !== null && ($commKey < 0 || $commKey > 4294967295)) {
+            throw new \InvalidArgumentException('Communication key must be an unsigned 32-bit integer.');
+        }
 
         $this->_ip = $ip;
         $this->_port = $port;
         $this->timeoutSeconds = (float) $timeoutSeconds;
+        $this->commKey = $commKey;
         $this->operationDeadline = $operationTimeoutSeconds === null ? null : hrtime(true) / 1e9 + (float) $operationTimeoutSeconds;
 
         $this->_zkclient = @socket_create(AF_INET, SOCK_DGRAM, SOL_UDP);
@@ -113,6 +119,21 @@ class LaravelZkteco
             throw new RuntimeException('Unexpected terminal reply identifier.', self::ERROR_PROTOCOL);
         }
         if ($header['command'] === Util::CMD_ACK_UNAUTH) {
+            if ($command === Util::CMD_CONNECT && $this->commKey !== null && $header['session'] !== 0) {
+                $this->_session_id = $header['session'];
+                try {
+                    $this->_command(Util::CMD_AUTH, Util::communicationKey($this->commKey, $header['session']));
+                    if (unpack('v', substr($this->_data_recv, 0, 2))[1] !== Util::CMD_ACK_OK) {
+                        throw new RuntimeException('Invalid terminal authentication response.', self::ERROR_PROTOCOL);
+                    }
+
+                    return '';
+                } catch (\Throwable $exception) {
+                    $this->_session_id = 0;
+                    $this->_data_recv = '';
+                    throw $exception;
+                }
+            }
             throw new RuntimeException('Terminal access is unauthorized.', self::ERROR_UNAUTHORIZED);
         }
         if ($header['command'] === Util::CMD_ACK_ERROR) {

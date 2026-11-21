@@ -109,6 +109,10 @@ try {
 }
 ```
 
+For a device requiring a Comm Key, pass its unsigned numeric key as the fifth
+constructor argument. A missing or incorrect key causes an explicit
+authentication failure. Store the key securely and do not hard-code it.
+
 The total deadline starts at construction and covers subsequent commands and
 attendance processing; it is not renewed per command. Without a fourth
 argument, each command and each attendance transfer is separately bounded by

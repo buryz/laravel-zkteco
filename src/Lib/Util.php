@@ -11,6 +11,8 @@ class Util
 
     const CMD_CONNECT = 1000; // Connections requests
 
+    const CMD_AUTH = 1102;
+
     const CMD_EXIT = 1001; // Disconnection requests
 
     const CMD_ENABLE_DEVICE = 1002; // Ensure the machine to be at the normal work condition
@@ -260,6 +262,17 @@ class Util
      * This function puts a the parts that make up a packet together and
      * packs them into a byte string
      */
+    public static function communicationKey(int $key, int $session): string
+    {
+        $reversed = 0;
+        for ($bit = 0; $bit < 32; $bit++) {
+            $reversed = ($reversed << 1) | (($key >> $bit) & 1);
+        }
+        $bytes = array_values(unpack('C4', pack('V', ($reversed + $session) & 0xFFFFFFFF)));
+
+        return pack('C4', $bytes[2] ^ 0x53 ^ 50, $bytes[3] ^ 0x4F ^ 50, 50, $bytes[1] ^ 0x4B ^ 50);
+    }
+
     public static function createHeader($command, $chksum, $session_id, $reply_id, $command_string)
     {
         $buf = pack('SSSS', $command, $chksum, $session_id, $reply_id).$command_string;
