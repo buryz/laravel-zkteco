@@ -2,7 +2,7 @@
 
 [![GitHub Tests Action Status](https://img.shields.io/github/actions/workflow/status/buryz/laravel-zkteco/run-tests.yml?branch=laravel-13-compat&label=tests&style=flat-square)](https://github.com/buryz/laravel-zkteco/actions)
 
-Laravel 13 compatibility fork of [mehedijaman/laravel-zkteco](https://github.com/mehedijaman/laravel-zkteco).
+Laravel 13 compatibility fork of [mehedijaman/laravel-zkteco](https://github.com/mehedijaman/laravel-zkteco), with Comm Key authentication and bounded UDP transfers.
 The original author attribution and MIT license are retained. The Composer name
 remains `mehedijaman/laravel-zkteco` so existing imports and dependencies work;
 install this fork through the VCS repository below, not the upstream Packagist release.
@@ -13,6 +13,16 @@ The Laravel ZKTeco package provides an easy way to integrate ZKTeco biometric de
 ## Laravel compatibility
 
 This fork is configured for Laravel 13 while retaining the declared Laravel 10, 11, and 12 compatibility. The test workflow targets Laravel 13 on PHP 8.4. Device and firmware compatibility still needs to be verified against the specific ZKTeco terminal.
+
+### Changes in this fork
+
+- Laravel 13 and PHP 8.4 compatibility, retaining the original package name and namespace.
+- Optional Comm Key authentication for UDP connections.
+- Configurable receive and overall operation deadlines, with explicit protocol,
+  authentication and incomplete-transfer errors.
+- Complete attendance transfer checks and support for a legacy UDP framing
+  variant; the final complete attendance record is no longer skipped.
+- Integer-safe terminal time decoding and timezone-independent wall-clock encoding.
 
 Attendance downloads also support the legacy UDP format observed on firmware
 `Ver 6.70 Aug 27 2014`: a 16-byte preparation response, numbered 1024-byte
@@ -112,6 +122,65 @@ try {
 For a device requiring a Comm Key, pass its unsigned numeric key as the fifth
 constructor argument. A missing or incorrect key causes an explicit
 authentication failure. Store the key securely and do not hard-code it.
+
+### Connect to a reader with a Comm Key
+
+The following example performs a connection and reads the firmware and clock
+only. It does not change the terminal clock or download attendance records.
+The address `192.0.2.10` is a documentation example, not a real reader.
+
+Add these entries to your application's `config/services.php`:
+
+```php
+'zkteco' => [
+    'ip' => env('ZK_READER_IP'),
+    'comm_key' => env('ZK_COMM_KEY'),
+],
+```
+
+Set `ZK_READER_IP` and `ZK_COMM_KEY` in the deployment's private environment
+or secrets manager. Set the key to the same numeric Comm Key configured on the
+reader. Do not commit it, put it in `.env.example`, or share it in logs.
+For multiple readers, store a separate key per device in a protected,
+encrypted store. In Docker, supply the values to the container running the
+reader operation; recreate it when its environment changes. Refresh Laravel's
+cached configuration when changing these values.
+
+Use the following code in your Laravel application:
+
+```php
+use MehediJaman\LaravelZkteco\LaravelZkteco;
+
+$ip = config('services.zkteco.ip');
+$commKey = config('services.zkteco.comm_key');
+
+if (! is_string($ip) || filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) === false
+    || ! is_string($commKey) || ! preg_match('/\A[0-9]{1,10}\z/', $commKey)
+    || (int) $commKey > 4294967295) {
+    throw new InvalidArgumentException('Configure a valid reader IPv4 address and numeric Comm Key.');
+}
+
+$zk = new LaravelZkteco($ip, 4370, 3, 40, (int) $commKey);
+try {
+    $zk->connect();
+    $firmware = $zk->version();
+    $terminalTime = $zk->getTime();
+} finally {
+    try {
+        if ($zk->_session_id !== 0) {
+            $zk->disconnect();
+        }
+    } finally {
+        $zk->close();
+    }
+}
+```
+
+The fifth argument is optional when no key is needed. A key of `0` is distinct
+from an omitted key. If authentication fails, check the key and port on the
+reader; do not print the key or retry repeatedly. Comm Key authentication does
+not encrypt UDP traffic: keep terminals on a trusted network and restrict
+access. Firmware-specific compatibility should be tested on each device.
 
 The total deadline starts at construction and covers subsequent commands and
 attendance processing; it is not renewed per command. Without a fourth

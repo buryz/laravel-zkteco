@@ -1,6 +1,6 @@
 {
     "name": "mehedijaman/laravel-zkteco",
-    "description": "Connect any zkteco fingerprint attendance machine to laravel application with no effort.",
+    "description": "Laravel 13 compatibility fork for ZKTeco UDP terminals, with Comm Key authentication and bounded transfers.",
     "keywords": [
         "ZKTeco",
         "Fingerprint",
